@@ -1,0 +1,196 @@
+x-airflow-common: &airflow-common
+  build: ./airflow
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    # Zona horaria del proyecto (GMT-3): schedules de los DAGs y fechas de la UI
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: America/Argentina/Buenos_Aires
+    AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: America/Argentina/Buenos_Aires
+    TZ: America/Argentina/Buenos_Aires
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    # Airflow se sirve bajo /airflow/ detras de nginx: necesita saberlo para
+    # generar los links y las rutas de los assets. El host se corrige solo via
+    # ProxyFix con los X-Forwarded-*; lo que importa aca es el path.
+    AIRFLOW__WEBSERVER__BASE_URL: ${PUBLIC_BASE_URL:-http://localhost}/airflow
+   #Config propia del proyecto
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+    AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+    AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+    CRYPTO_DB_URI: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/crypto
+    BINANCE_BASE_URL: ${BINANCE_BASE_URL}
+    HISTORY_YEARS: ${HISTORY_YEARS}
+    AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX: "true"
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    # Modulo compartido con Streamlit (unica fuente de verdad de SYMBOLS, DB y MLflow)
+    - ./shared/common:/opt/airflow/dags/common
+    - ./airflow-logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+    mlflow:
+      condition: service_started
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+    - "5432:5432"
+    volumes:
+    - pgdata:/var/lib/postgresql/data
+    - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # sin esto la consola sirve sus assets desde / y se rompe detras de /minio/
+      MINIO_BROWSER_REDIRECT_URL: ${PUBLIC_BASE_URL:-http://localhost}/minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing local/${MLFLOW_BUCKET} &&
+      echo 'Bucket listo'"
+
+  mlflow:
+    build: ./mlflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+    command: >
+      mlflow server
+      --backend-store-uri postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${MLFLOW_BUCKET}
+      --artifacts-destination s3://${MLFLOW_BUCKET}
+      --host 0.0.0.0
+      --port 5000
+    ports:
+      - "5000:5000"
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username ${AIRFLOW_ADMIN_USER} \
+          --password ${AIRFLOW_ADMIN_PASSWORD} \
+          --firstname MLOps --lastname Admin \
+          --role Admin --email admin@example.com || true
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # con AIRFLOW__WEBSERVER__BASE_URL=.../airflow la app se monta bajo ese
+      # prefijo, asi que /health devuelve 404 y el contenedor queda "unhealthy"
+      test: ["CMD", "curl", "-f", "http://localhost:8080/airflow/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  streamlit:
+    build: ./streamlit
+    volumes:
+      - ./streamlit:/app
+      - ./shared/common:/app/common
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      CRYPTO_DB_URI: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/crypto
+      TZ: America/Argentina/Buenos_Aires
+    expose:
+      - "8501"
+
+  api:
+    build: ./api
+    volumes:
+      - ./api:/app
+      - ./shared/common:/app/common
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CRYPTO_DB_URI: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/crypto
+      TZ: America/Argentina/Buenos_Aires
+    ports:
+      - "8000:8000"
+
+  nginx:
+    build: ./nginx
+    volumes:
+      # montado, no solo COPY en la imagen: asi un cambio de config se aplica
+      # con `docker compose restart nginx`, sin rebuild
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - airflow-webserver
+      - mlflow
+      - streamlit
+      - api
+    ports:
+      - "80:80"
+
+volumes:
+  pgdata:
+  minio-data:
+  airflow-logs:
