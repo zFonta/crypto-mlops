@@ -97,7 +97,7 @@ def _backtest_with_cv(model, df: pd.DataFrame) -> dict:
         initial="60 days",      # primera ventana de entrenamiento
         period="24 hours",      # re-entrena cada 24h
         horizon="7 days",       # predice 7 dias adelante
-        parallel="processes",
+        # parallel="dask",  ← O sin la línea (usa threading por defecto)
     )
     
     metrics = performance_metrics(cv_results)
