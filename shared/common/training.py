@@ -94,9 +94,9 @@ def _backtest_with_cv(model, df: pd.DataFrame) -> dict:
     # Repite cada 24 horas
     cv_results = cross_validation(
         model,
-        initial="60 days",      # primera ventana de entrenamiento
-        period="24 hours",      # re-entrena cada 24h
-        horizon="7 days",       # predice 7 dias adelante
+        initial="30 days",      # ← REDUCIDO de 60
+        period="48 hours",      # ← AUMENTADO de 24 (menos folds)
+        horizon="3 days",       # ← REDUCIDO de 7
         # parallel="dask",  ← O sin la línea (usa threading por defecto)
     )
     
