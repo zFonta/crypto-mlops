@@ -1,5 +1,12 @@
-from unittest.mock import MagicMock
+#--------------------------------------------------#
+# Test para lógica de paginación de fetch_klines() #
+#--------------------------------------------------#
 
+
+from unittest.mock import MagicMock
+from datetime import datetime, timezone
+import time_machine
+import requests
 import pytest
 
 from common import binance
@@ -72,3 +79,57 @@ def test_cursor_past_end_ms_never_requests(monkeypatch):
 
     assert result == []
     session.get.assert_not_called()
+
+# ---------------------------------------------------------------------------
+# Complementos: error HTTP, vela abierta con reloj congelado, y params enviados
+# ---------------------------------------------------------------------------
+
+def _failing_resp(status_exc: Exception) -> MagicMock:
+    """Response cuyo raise_for_status() lanza, como haria un 429/503 real."""
+    resp = MagicMock()
+    resp.raise_for_status.side_effect = status_exc
+    return resp
+
+
+def test_http_error_is_propagated(monkeypatch):
+    """Un 429/503 debe cortar con excepcion, nunca devolver lista parcial en
+    silencio (un retorno parcial deja huecos invisibles en `prices`)."""
+    session = MagicMock()
+    session.get.side_effect = [_failing_resp(requests.HTTPError("429"))]
+    monkeypatch.setattr(binance.requests, "Session", lambda: session)
+
+    with pytest.raises(requests.HTTPError):
+        binance.fetch_klines("BTCUSDT", start_ms=1000, end_ms=10**15)
+
+
+def test_open_candle_dropped_against_frozen_now(monkeypatch):
+    """El filtro final es `close_time < now`. Con el reloj congelado el borde es
+    determinístico: la vela que cierra justo en `now` sigue abierta y se descarta;
+    la que cerro 1 ms antes se conserva."""
+    frozen = datetime(2026, 3, 1, 14, 20, tzinfo=timezone.utc)
+    now_ms = int(frozen.timestamp() * 1000)
+
+    just_closed = _kline(now_ms - 3_600_000, now_ms - 1)   # cerro 1 ms antes de now
+    still_open = _kline(now_ms - 3_600_000 + 1, now_ms)    # cierra exactamente en now
+    _install_fake_session(monkeypatch, [[just_closed, still_open]])
+
+    with time_machine.travel(frozen, tick=False):
+        result = binance.fetch_klines("BTCUSDT", start_ms=now_ms - 7_200_000, end_ms=now_ms + 10**9)
+
+    assert result == [just_closed]
+
+
+def test_request_params_are_correct(monkeypatch):
+    """Ademas de startTime (ya cubierto), verificar symbol, interval, endTime y
+    limit: si alguno se rompe, el backfill trae datos de mas o del simbolo/intervalo
+    equivocado sin que ningun otro test lo note."""
+    monkeypatch.setattr(binance, "MAX_LIMIT", 500)
+    session = _install_fake_session(monkeypatch, [[_kline(1000, 1000)]])
+
+    binance.fetch_klines("ETHUSDT", start_ms=1000, end_ms=999_999, interval="4h")
+
+    params = session.get.call_args_list[0].kwargs["params"]
+    assert params["symbol"] == "ETHUSDT"
+    assert params["interval"] == "4h"
+    assert params["endTime"] == 999_999
+    assert params["limit"] == 500
