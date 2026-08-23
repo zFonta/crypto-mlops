@@ -7,6 +7,7 @@ import time_machine
 import dag_monitor_band
 from common.config import RETRAIN_COOLDOWN_HOURS
 
+FROZEN_NOW = datetime(2026, 3, 1, 14, 20, tzinfo=timezone.utc)
 
 def _get_callable(task):
     """Extrae la funcion original de una task de TaskFlow, sea simple o mapeada

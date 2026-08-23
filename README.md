@@ -340,6 +340,43 @@ Opcionales, con default en `shared/common/config.py`:
 
 `CRYPTO_DB_URI`, `MLFLOW_TRACKING_URI`, `MLFLOW_S3_ENDPOINT_URL` y las credenciales AWS/MinIO las inyecta `docker-compose.yml`; no hace falta definirlas a mano.
 
+## Unit Testing
+
+El proyecto incluye tests unitarios en `tests/`. No requieren Postgres, MLflow ni
+Binance en ejecución — trabajan con mocks y datos sintéticos.
+
+### Ejecución rápida (sin Airflow)
+
+```bash
+pip install mlflow-skinny pandas pytest requests
+pytest tests/test_training.py tests/test_binance.py -v
+```
+
+Cubre la ponderación por recencia (`test_training.py`) y la paginación del cliente
+de Binance (`test_binance.py`).
+
+### Suite completa (incluye el DAG de monitoreo)
+
+`test_monitor_band.py` importa el DAG de Airflow, por lo que necesita el stack
+completo. Se corre dentro de Docker:
+
+```bash
+docker compose up -d
+docker compose cp tests/. airflow-scheduler:/opt/airflow/tests/
+docker compose exec airflow-scheduler bash -c \
+  "pip install pytest && PYTHONPATH=/opt/airflow/dags pytest /opt/airflow/tests/ -v"
+```
+
+### Estructura
+
+| Archivo | Qué testea | Dependencias externas |
+|---|---|---|
+| `test_training.py` | Ponderación por recencia (`_apply_recency_weights`) | `pandas` |
+| `test_binance.py` | Paginación, cursor y descarte de vela abierta | `requests` (mockeado) |
+| `test_monitor_band.py` | Detección de breach, cooldown y filtrado de símbolos | `airflow`, `mlflow` (mockeados) |
+
+
+
 
 ## Stack
 
