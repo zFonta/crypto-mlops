@@ -22,6 +22,7 @@ Reglas fijadas (ver tests/test_breach.py):
 """
 
 from dataclasses import dataclass
+from math import isnan
 from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
@@ -53,6 +54,12 @@ def _exigir_aware(nombre: str, dt: Optional[datetime]) -> None:
             f"como TIMESTAMPTZ y compararlos con un naive tira TypeError."
         )
 
+def _falta(x: Optional[float]) -> bool:
+    """None (nunca escrito) o NaN (Prophet puede emitir yhat degenerado en un
+    fit malo) cuentan igual: no hay banda utilizable. Sin el chequeo de NaN,
+    `precio > nan` y `precio < nan` son False -- cae en DENTRO en vez de
+    SIN_BANDA, y un modelo con banda degenerada queda "sano" para siempre."""
+    return x is None or isnan(x)
 
 def evaluar_breach(
     symbol: str,
@@ -66,7 +73,7 @@ def evaluar_breach(
     _exigir_aware("ahora", ahora)
     _exigir_aware("ultimo_retrain", ultimo_retrain)
 
-    if precio is None or yhat_lower is None or yhat_upper is None:
+    if _falta(precio) or _falta(yhat_lower) or _falta(yhat_upper):
         return Decision(symbol, breach=False, reentrenar=False, motivo=SIN_BANDA)
 
     if precio > yhat_upper:
