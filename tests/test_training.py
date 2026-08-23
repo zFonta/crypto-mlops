@@ -70,3 +70,65 @@ def test_repeated_rows_keep_their_original_values():
     for ds, y in zip(df["ds"], df["y"]):
         matches = out[out["ds"] == ds]
         assert (matches["y"] == y).all()
+
+# ---------------------------------------------------------------------------
+# Complementos: parametros reales de produccion e invariantes generales
+# ---------------------------------------------------------------------------
+
+def test_production_params_cutoffs():
+    """Con los valores reales (MAX=3, semivida=120) fija los cortes que documenta
+    el README, en vez de la aritmetica 'legible' 4/100 del resto del archivo.
+
+    Ojo el redondeo bancario: a 120 dias el peso crudo es 1.5 y round(1.5)=2
+    (redondeo a par), asi que la fila de la semivida cae del lado del 2, no del 1.
+    """
+    # NO usa el fixture fixed_weight_params: monkeypatchea a los valores reales.
+    saved = (training.MAX_SAMPLE_WEIGHT, training.WEIGHT_HALF_LIFE_DAYS)
+    training.MAX_SAMPLE_WEIGHT, training.WEIGHT_HALF_LIFE_DAYS = 3, 120
+    try:
+        df = _df([0.0, 31.0, 33.0, 119.0, 121.0, 364.0])
+        out = training._apply_recency_weights(df)
+        reps = {int(a): _reps_for(out, df["ds"].iloc[i]) for i, a in
+                enumerate([0, 31, 33, 119, 121, 364])}
+    finally:
+        training.MAX_SAMPLE_WEIGHT, training.WEIGHT_HALF_LIFE_DAYS = saved
+
+    assert reps[0] == 3      # la hora mas reciente pesa el maximo
+    assert reps[31] == 3     # ~antes del primer corte
+    assert reps[33] == 2     # ~despues del primer corte
+    assert reps[119] == 2    # antes de la semivida
+    assert reps[121] == 1    # despues de la semivida
+    assert reps[364] == 1    # el borde de la ventana de entrenamiento
+
+
+def test_weight_is_monotonic_non_increasing():
+    """Mas viejo nunca pesa mas que mas nuevo."""
+    df = _df([0.0, 10.0, 50.0, 100.0, 300.0, 500.0])
+    out = training._apply_recency_weights(df)
+    reps = [_reps_for(out, ds) for ds in sorted(df["ds"], reverse=True)]  # de mas nuevo a mas viejo
+    assert all(a >= b for a, b in zip(reps, reps[1:])), reps
+
+
+def test_no_row_exceeds_max_weight():
+    """Ningun peso supera MAX_SAMPLE_WEIGHT (la fila mas reciente marca el techo)."""
+    df = _df([0.0, 5.0, 40.0, 200.0])
+    out = training._apply_recency_weights(df)
+    max_reps = max(_reps_for(out, ds) for ds in df["ds"])
+    assert max_reps <= training.MAX_SAMPLE_WEIGHT
+
+
+def test_no_hour_is_lost():
+    """Repetir filas nunca debe PERDER una hora: el set de ds unicos del output
+    tiene que ser igual al del input (si el modelo deja de ver una parte del
+    anio, el trend se estima peor y nada en el dashboard lo delata)."""
+    df = _df([0.0, 10.0, 100.0, 250.0, 400.0])
+    out = training._apply_recency_weights(df)
+    assert set(out["ds"]) == set(df["ds"])
+
+
+def test_does_not_mutate_input():
+    """La expansion no debe alterar el DataFrame de entrada."""
+    df = _df([0.0, 100.0, 300.0])
+    before = len(df)
+    training._apply_recency_weights(df)
+    assert len(df) == before
